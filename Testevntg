@@ -1,0 +1,77 @@
+function fn_intraday_ldg_to_proc_mq_opf(doc, meta, guid, logData, isRetry) {
+    try {
+        logData.prepd_stmt = "ups_rtp_intraday_ldg_to_proc_v2";
+        var createdBy = "ev_tps_mq_rtp_ldg_to_proc_dtl|ups_rtp_intraday_ldg_to_proc_v2";
+
+        // Extract fields directly from doc (no N1QL read-back)
+        var ntfctn = doc.Document.BkToCstmrDbtCdtNtfctn.Ntfctn;
+        var ntry = ntfctn.Ntry;
+        var txDtls = ntry.NtryDtls.TxDtls;
+        var cdtDbtInd = ntry.CdtDbtInd;
+
+        // Flatten fields from doc - same logic as CTE in your prepared statement
+        var acct_nb = (cdtDbtInd === "CRDT")
+            ? String(txDtls.RltdPties.CdtrAcct.Id.Othr.Id).padStart(11, '0')
+            : String(txDtls.RltdPties.DbtrAcct.Id.Othr.Id).padStart(11, '0');
+
+        var rtg_nb = (cdtDbtInd === "CRDT")
+            ? txDtls.RltdAgts.CdtrAgt.FinInstnId.ClrSysMmbId.MmbId
+            : txDtls.RltdAgts.DbtrAgt.FinInstnId.ClrSysMmbId.MmbId;
+
+        var tx_tp = (cdtDbtInd === "CRDT") ? 'C' : 'D';
+        var tx_cd = ntry.BkTxCd.Domn.Fmly.SubFmlyCd;
+        var tx_amt = txDtls.Amt.val_text;
+        var prc_dt = ntry.ValDt.Dt;
+        var orgtr_acct_nb = txDtls.RltdPties.DbtrAcct.Id.Othr.Id;
+        var orgtr_nm = txDtls.RltdPties.Dbtr.Pty.Nm;
+        var bnfcry_acct_nb = txDtls.RltdPties.CdtrAcct.Id.Othr.Id;
+        var bnfcry_nm = txDtls.RltdPties.Cdtr.Pty.Nm;
+        var bnfcry_strt = txDtls.RltdPties.Cdtr.Pty.PstlAdr.StrtNm;
+        var bnfcry_bldg = txDtls.RltdPties.Cdtr.Pty.PstlAdr.TwnNm;
+        var msgid = ntfctn.GrpHdr.MsgId;
+        var ref_for_bnfcry = ntry.NtryDtls.TxDtls.RmtInf.Ustrd;
+        var tx_id = ntry.NtryDtls.TxDtls.Refs.TxId;
+
+        // Pass extracted values as parameters to the prepared statement
+        var queryBuild = "EXECUTE ups_rtp_intraday_ldg_to_proc_v2 USING {"
+            + "'acct_nb': '" + acct_nb + "'"
+            + ", 'rtg_nb': '" + rtg_nb + "'"
+            + ", 'tx_tp': '" + tx_tp + "'"
+            + ", 'tx_cd': '" + tx_cd + "'"
+            + ", 'tx_amt': '" + tx_amt + "'"
+            + ", 'prc_dt': '" + prc_dt + "'"
+            + ", 'orgtr_acct_nb': '" + orgtr_acct_nb + "'"
+            + ", 'orgtr_nm': '" + orgtr_nm + "'"
+            + ", 'bnfcry_acct_nb': '" + bnfcry_acct_nb + "'"
+            + ", 'bnfcry_nm': '" + bnfcry_nm + "'"
+            + ", 'bnfcry_strt': '" + bnfcry_strt + "'"
+            + ", 'bnfcry_bldg': '" + bnfcry_bldg + "'"
+            + ", 'msgid': '" + msgid + "'"
+            + ", 'ref_for_bnfcry': '" + ref_for_bnfcry + "'"
+            + ", 'tx_id': '" + tx_id + "'"
+            + ", 'meta_id': '" + meta.id + "'"
+            + ", 'created_by': '" + createdBy + "'"
+            + "}";
+
+        var queryResult = N1QL(queryBuild);
+        for (var item of queryResult) {
+            var newMeta = { "id": item.key };
+            var newDoc = item.value;
+        }
+        queryResult.close();
+
+        // Upsert into process collection
+        var result = couchbase.upsert(colltn_tran_bai_detail_sameday, newMeta, newDoc);
+        if (result.success) {
+            fn_addLog(guid, logData, "INFO Executed:", queryBuild, ". Result: Success");
+        } else {
+            throw new Error(result.error.desc);
+        }
+    } catch (error) {
+        if (isRetry) {
+            fn_addLog(guid, logData, "ERROR Executed:", queryBuild, ". Result: Failed.", error.message);
+            var res = fn_executeRetry(fn_intraday_ldg_to_proc_mq_opf, [doc, meta, guid, logData, false]);
+            return res;
+        }
+    }
+}
