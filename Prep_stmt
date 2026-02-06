@@ -1,0 +1,40 @@
+PREPARE ups_rtp_intraday_ldg_to_proc_v2 AS
+SELECT
+    CONCAT2('|', $acct_nb, $rtg_nb, REPLACE($prc_dt,'-',''), $tx_id)  AS `key`,
+    {
+        "detail_sameday"                           AS type,
+        "rtp"                                      AS src_sys,
+        $acct_nb                                   AS acct_nb,
+        $rtg_nb                                    AS rtg_nb,
+        -- Join ref tables only (no landing read)
+        ref_bnk.BankNumber                         AS bk_nb,
+        ref_bnk.BankCode                           AS bk_cd,
+        $tx_amt                                    AS tx_amt,
+        $tx_cd                                     AS tx_cd,
+        $prc_dt                                    AS prc_dt,
+        $tx_tp                                     AS tx_tp,
+        ref_dtl.TranCodeDesc                       AS tx_desc,
+        -- bsic_tx_desc and std_tx_desc CASE logic stays in N1QL
+        CASE WHEN $tx_tp='C' THEN {
+            "orgtr": IFMISSINGORNULL($orgtr_nm,''),
+            "trac_nb": IFMISSINGORNULL($tx_id,''),
+            "ref_for_bnfcry": IFMISSINGORNULL($ref_for_bnfcry,''),
+            "orgtr_acct": IFMISSINGORNULL($orgtr_acct_nb,'')
+        }
+        WHEN $tx_tp='D' THEN {
+            "bnfcry_nm": IFMISSINGORNULL($bnfcry_nm,''),
+            "trac_nb": IFMISSINGORNULL($tx_id,''),
+            "ref_for_bnfcry": IFMISSINGORNULL($ref_for_bnfcry,''),
+            "bnfcry_acct": IFMISSINGORNULL($bnfcry_acct_nb,'')
+        }
+        END                                        AS bsic_tx_desc,
+        $tx_id                                     AS tx_id,
+        CLOCK_TZ('US/Central')                     AS cretd_on,
+        $created_by                                AS cretd_by
+    } AS `value`
+FROM `landing`.`reference`.`baicd_txncd_to_dtlcd_mapping` ref_dtl
+INNER JOIN `landing`.`reference`.`banknb_to_routingnb_mapping` ref_bnk
+    ON $rtg_nb = ref_bnk.RoutingNumber AND ref_bnk.Status = 'A'
+INNER JOIN `landing`.`reference`.`customer_to_account` ref_cta
+    ON $acct_nb = ref_cta.AccountNumber AND ref_bnk.BankNumber = ref_cta.BankNumber
+WHERE ref_dtl.TranCode = $tx_cd AND ref_dtl.Status = 'A';
