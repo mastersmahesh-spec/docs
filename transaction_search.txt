@@ -1,0 +1,359 @@
+ReportName: Transaction search with credit – Sameday
+
+So, when user select various parameters like account_number, search patterns like amount, or amount range, reference number or range, description contains or starts with, etc., and submit the transaction report should display the report with transaction count and transaction details. Here are the queries. 
+
+This below query is to calculate Transaction count
+ 
+WITH
+    cte AS (
+        SELECT
+            d.acct_nb AS acct_nb,
+            d.tx_dt,
+            c.dtl_bai_cd AS dtl_bai_cd,
+            'CR' AS tx_tp,
+            IF_MISSING (c.tx_desc, "") AS tx_desc,
+            CASE
+                WHEN c.dtl_bai_cd IN achincomingcredit THEN --ACH - Incoming 
+                IF_MISSING (c.std_tx_desc.orgtr, "")
+                ELSE CASE
+                    WHEN c.dtl_bai_cd IN achsettlecredit THEN --ACH - Outgoing Settlement 
+                    IF_MISSING (c.std_tx_desc.orgtr, "")
+                    ELSE CASE
+                        WHEN c.dtl_bai_cd IN achreturncredit THEN --ACH - Returns 
+                        IF_MISSING (c.std_tx_desc.orgnl_rcvr, "")
+                        ELSE CASE
+                            WHEN c.dtl_bai_cd IN wirescredit THEN -- Wire - Incoming 
+                            IF_MISSING (c.std_tx_desc.orgtr, "")
+                            ELSE CASE
+                                WHEN c.dtl_bai_cd IN rtpcredit THEN -- Instant Payments -Incoming  
+                                IF_MISSING (c.std_tx_desc.orgtr, "")
+                                ELSE ""
+                            END
+                        END
+                    END
+                END
+            END AS orgtr_rcvr,
+            IF_MISSING (c.std_tx_desc.ref_nb, "") AS ref_nb,
+            c.tx_amt AS tx_amt,
+            c.tx_id
+        FROM
+            semantic.dhub_standard_reports.daily_statement_detail_sameday AS d
+        UNNEST
+            d.acct_cdts.dtl AS c
+        LET achincomingcredit = ['165'],
+        achsettlecredit = ['166'],
+        achreturncredit = ['168', '257'],
+        rtpcredit = ['158'],
+        wirescredit = ['195', '196', '201', '206', '208', '227'],
+        varregexplike = CASE
+            WHEN $searchtype = 1 THEN '.*' || $descriptivetext || '.*' -- CONTAINS
+            ELSE CASE
+                WHEN $searchtype = 2 THEN $descriptivetext || '.*' -- START WITH
+                ELSE $descriptivetext
+            END
+        END,
+        varlike = CASE
+            WHEN $searchtype = 1 THEN '%' || $descriptivetext || '%' -- CONTAINS
+            ELSE CASE
+                WHEN $searchtype = 2 THEN $descriptivetext || '%' -- START WITH
+                ELSE $descriptivetext
+            END
+        END
+        WHERE
+            d.acct_rtg_nb IN $acct_rtg_nb
+            AND c.bh_pdct_ctgy IN $bh_pdct_ctgy
+            --AND d.tx_dt BETWEEN $startDate AND $endDate
+            AND CASE
+                WHEN $amount_param = 1 THEN TONUMBER(c.tx_amt) BETWEEN TONUMBER($minamount) AND TONUMBER($maxamount)
+                ELSE CASE
+                    WHEN $amount_param = 2 THEN TONUMBER(c.tx_amt) = TONUMBER($amount)
+                    ELSE 1 = 1
+                END
+            END
+            AND CASE
+                WHEN $reference_param = 1 THEN TONUMBER(c.std_tx_desc.ref_nb) BETWEEN TONUMBER($minreference) AND TONUMBER($maxreference)
+                ELSE CASE
+                    WHEN $reference_param = 2 THEN TONUMBER(c.std_tx_desc.ref_nb) = TONUMBER($reference)
+                    ELSE 1 = 1
+                END
+            END
+            AND CASE
+                WHEN $search_param = 0 THEN ----payroll
+                (
+                    CASE
+                        WHEN c.dtl_bai_cd IN achincomingcredit THEN --ACH - Incoming 
+                        REGEXP_LIKE(c.std_tx_desc.orgtr, varregexplike)
+                        OR REGEXP_LIKE(c.std_tx_desc.rcvr, varregexplike)
+                        ELSE CASE
+                            WHEN c.dtl_bai_cd IN achsettlecredit THEN --ACH - Outgoing Settlement 
+                            REGEXP_LIKE(c.std_tx_desc.orgtr, varregexplike)
+                            ELSE CASE
+                                WHEN c.dtl_bai_cd IN achreturncredit THEN --ACH - Returns 
+                                REGEXP_LIKE(c.std_tx_desc.orgnl_rcvr, varregexplike)
+                                OR REGEXP_LIKE(c.std_tx_desc.orgnl_orgtr, varregexplike)
+                                OR REGEXP_LIKE(c.full_tx_desc.rtr_orgtr, varregexplike)
+                                ELSE CASE
+                                    WHEN c.dtl_bai_cd IN wirescredit THEN -- Wire - Incoming 
+                                    REGEXP_LIKE(c.std_tx_desc.orgtr, varregexplike)
+                                    ELSE CASE
+                                        WHEN c.dtl_bai_cd IN rtpcredit THEN -- Instant Payments -Incoming  
+                                        REGEXP_LIKE(c.std_tx_desc.orgtr, varregexplike)
+                                    END
+                                END
+                            END
+                        END
+                    END
+                )
+                ELSE CASE
+                    WHEN $search_param = 1 THEN --Tran id
+                    (
+                        CASE
+                            WHEN c.dtl_bai_cd IN achincomingcredit THEN --ACH - Incoming 
+                            REGEXP_LIKE(c.std_tx_desc.det_id_nb, varregexplike)
+                            OR REGEXP_LIKE(c.std_tx_desc.trac_nb, varregexplike)
+                            ELSE CASE
+                                WHEN c.dtl_bai_cd IN achsettlecredit THEN --ACH - Outgoing Settlement 
+                                REGEXP_LIKE(c.std_tx_desc.btch_nb, varregexplike)
+                                OR REGEXP_LIKE(c.std_tx_desc.orgtr_trac_nb, varregexplike)
+                                ELSE CASE
+                                    WHEN c.dtl_bai_cd IN achreturncredit THEN --ACH - Returns 
+                                    REGEXP_LIKE(c.std_tx_desc.orgnl_det_id_nb, varregexplike)
+                                    OR REGEXP_LIKE(c.std_tx_desc.rtr_btch_nb, varregexplike)
+                                    OR REGEXP_LIKE(c.std_tx_desc.orgnl_bk_trac_nb, varregexplike)
+                                    OR REGEXP_LIKE(c.std_tx_desc.orgnl_orgtr_trac_nb, varregexplike)
+                                    OR REGEXP_LIKE(c.full_tx_desc.rtr_bk_trac_nb, varregexplike)
+                                    ELSE CASE
+                                        WHEN c.dtl_bai_cd IN wirescredit THEN -- Wire - Incoming 
+                                        REGEXP_LIKE(c.std_tx_desc.sndr_ref, varregexplike)
+                                        OR REGEXP_LIKE(c.std_tx_desc.sys_ref, varregexplike)
+                                        ELSE CASE
+                                            WHEN c.dtl_bai_cd IN rtpcredit THEN -- Instant Payments -Incoming  
+                                            REGEXP_LIKE(c.std_tx_desc.trac_nb, varregexplike)
+                                            ELSE REGEXP_LIKE(c.std_tx_desc.ref_nb, varregexplike)
+                                        END
+                                    END
+                                END
+                            END
+                        END
+                    )
+                    ELSE CASE
+                        WHEN $search_param = 2 THEN ----Remit
+                        (
+                            CASE
+                                WHEN c.dtl_bai_cd IN achincomingcredit THEN --ACH - Incoming 
+                                REGEXP_LIKE(c.std_tx_desc.ntry_desc, varregexplike)
+                                OR ANY rmt_inf IN c.std_tx_desc.rmt_inf_non_ctx SATISFIES rmt_inf LIKE varlike
+                            END
+                            OR ANY rmt_inf IN c.full_tx_desc.rmt_inf_ctx SATISFIES rmt_inf LIKE varlike END ELSE CASE
+                                WHEN c.dtl_bai_cd IN achsettlecredit THEN --ACH - Outgoing Settlement 
+                                REGEXP_LIKE(c.std_tx_desc.ntry_desc, varregexplike)
+                                ELSE CASE
+                                    WHEN c.dtl_bai_cd IN achreturncredit THEN --ACH - Returns 
+                                    REGEXP_LIKE(c.std_tx_desc.rtr_rsn, varregexplike)
+                                    OR REGEXP_LIKE(c.std_tx_desc.rtr_ntry_desc, varregexplike)
+                                    OR REGEXP_LIKE(c.std_tx_desc.dt_of_dth, varregexplike)
+                                    OR REGEXP_LIKE(c.full_tx_desc.orgnl_ntry_desc, varregexplike)
+                                    OR ANY rmt_inf IN c.full_tx_desc.rmt_inf SATISFIES rmt_inf LIKE varlike
+                                END
+                                ELSE CASE
+                                    WHEN c.dtl_bai_cd IN wirescredit THEN -- Wire - Incoming 
+                                    REGEXP_LIKE(c.std_tx_desc.ref_for_bnfcry, varregexplike)
+                                    OR REGEXP_LIKE(c.std_tx_desc.orgtr_to_bnfcry_ref, varregexplike)
+                                    ELSE CASE
+                                        WHEN c.dtl_bai_cd IN rtpcredit THEN -- Instant Payments -Incoming  
+                                        REGEXP_LIKE(c.std_tx_desc.ref_for_bnfcry, varregexplike)
+                                    END
+                                END
+                            END END END
+                        )
+                        ELSE 1 = 1
+                    END
+                END
+            END
+    )
+SELECT
+    count(*) AS a
+FROM
+    Cte
+
+
+This below query is to calculate Transaction details
+
+WITH
+    cte AS (
+        SELECT
+            d.acct_nb AS acct_nb,
+            d.tx_dt,
+            c.dtl_bai_cd AS dtl_bai_cd,
+            'CR' AS tx_tp,
+            IF_MISSING (c.tx_desc, "") AS tx_desc,
+            CASE
+                WHEN c.dtl_bai_cd IN achincomingcredit THEN --ACH - Incoming 
+                IF_MISSING (c.std_tx_desc.orgtr, "")
+                ELSE CASE
+                    WHEN c.dtl_bai_cd IN achsettlecredit THEN --ACH - Outgoing Settlement 
+                    IF_MISSING (c.std_tx_desc.orgtr, "")
+                    ELSE CASE
+                        WHEN c.dtl_bai_cd IN achreturncredit THEN --ACH - Returns 
+                        IF_MISSING (c.std_tx_desc.orgnl_rcvr, "")
+                        ELSE CASE
+                            WHEN c.dtl_bai_cd IN wirescredit THEN -- Wire - Incoming 
+                            IF_MISSING (c.std_tx_desc.orgtr, "")
+                            ELSE CASE
+                                WHEN c.dtl_bai_cd IN rtpcredit THEN -- Instant Payments -Incoming  
+                                IF_MISSING (c.std_tx_desc.orgtr, "")
+                                ELSE ""
+                            END
+                        END
+                    END
+                END
+            END AS orgtr_rcvr,
+            IF_MISSING (c.std_tx_desc.ref_nb, "") AS ref_nb,
+            c.tx_amt AS tx_amt,
+            c.tx_id
+        FROM
+            semantic.dhub_standard_reports.daily_statement_detail_sameday AS d
+        UNNEST
+            d.acct_cdts.dtl AS c
+        LET achincomingcredit = ['165'],
+        achsettlecredit = ['166'],
+        achreturncredit = ['168', '257'],
+        rtpcredit = ['158'],
+        wirescredit = ['195', '196', '201', '206', '208', '227'],
+        varregexplike = CASE
+            WHEN $searchtype = 1 THEN '.*' || $descriptivetext || '.*' -- CONTAINS
+            ELSE CASE
+                WHEN $searchtype = 2 THEN $descriptivetext || '.*' -- START WITH
+                ELSE $descriptivetext
+            END
+        END,
+        varlike = CASE
+            WHEN $searchtype = 1 THEN '%' || $descriptivetext || '%' -- CONTAINS
+            ELSE CASE
+                WHEN $searchtype = 2 THEN $descriptivetext || '%' -- START WITH
+                ELSE $descriptivetext
+            END
+        END
+        WHERE
+            d.acct_rtg_nb IN $acct_rtg_nb
+            AND c.bh_pdct_ctgy IN $bh_pdct_ctgy
+            --AND d.tx_dt BETWEEN $startDate AND $endDate
+            AND CASE
+                WHEN $amount_param = 1 THEN TONUMBER(c.tx_amt) BETWEEN TONUMBER($minamount) AND TONUMBER($maxamount)
+                ELSE CASE
+                    WHEN $amount_param = 2 THEN TONUMBER(c.tx_amt) = TONUMBER($amount)
+                    ELSE 1 = 1
+                END
+            END
+            AND CASE
+                WHEN $reference_param = 1 THEN TONUMBER(c.std_tx_desc.ref_nb) BETWEEN TONUMBER($minreference) AND TONUMBER($maxreference)
+                ELSE CASE
+                    WHEN $reference_param = 2 THEN TONUMBER(c.std_tx_desc.ref_nb) = TONUMBER($reference)
+                    ELSE 1 = 1
+                END
+            END
+            AND CASE
+                WHEN $search_param = 0 THEN ----payroll
+                (
+                    CASE
+                        WHEN c.dtl_bai_cd IN achincomingcredit THEN --ACH - Incoming 
+                        REGEXP_LIKE(c.std_tx_desc.orgtr, varregexplike)
+                        OR REGEXP_LIKE(c.std_tx_desc.rcvr, varregexplike)
+                        ELSE CASE
+                            WHEN c.dtl_bai_cd IN achsettlecredit THEN --ACH - Outgoing Settlement 
+                            REGEXP_LIKE(c.std_tx_desc.orgtr, varregexplike)
+                            ELSE CASE
+                                WHEN c.dtl_bai_cd IN achreturncredit THEN --ACH - Returns 
+                                REGEXP_LIKE(c.std_tx_desc.orgnl_rcvr, varregexplike)
+                                OR REGEXP_LIKE(c.std_tx_desc.orgnl_orgtr, varregexplike)
+                                OR REGEXP_LIKE(c.full_tx_desc.rtr_orgtr, varregexplike)
+                                ELSE CASE
+                                    WHEN c.dtl_bai_cd IN wirescredit THEN -- Wire - Incoming 
+                                    REGEXP_LIKE(c.std_tx_desc.orgtr, varregexplike)
+                                    ELSE CASE
+                                        WHEN c.dtl_bai_cd IN rtpcredit THEN -- Instant Payments -Incoming  
+                                        REGEXP_LIKE(c.std_tx_desc.orgtr, varregexplike)
+                                    END
+                                END
+                            END
+                        END
+                    END
+                )
+                ELSE CASE
+                    WHEN $search_param = 1 THEN --Tran id
+                    (
+                        CASE
+                            WHEN c.dtl_bai_cd IN achincomingcredit THEN --ACH - Incoming 
+                            REGEXP_LIKE(c.std_tx_desc.det_id_nb, varregexplike)
+                            OR REGEXP_LIKE(c.std_tx_desc.trac_nb, varregexplike)
+                            ELSE CASE
+                                WHEN c.dtl_bai_cd IN achsettlecredit THEN --ACH - Outgoing Settlement 
+                                REGEXP_LIKE(c.std_tx_desc.btch_nb, varregexplike)
+                                OR REGEXP_LIKE(c.std_tx_desc.orgtr_trac_nb, varregexplike)
+                                ELSE CASE
+                                    WHEN c.dtl_bai_cd IN achreturncredit THEN --ACH - Returns 
+                                    REGEXP_LIKE(c.std_tx_desc.orgnl_det_id_nb, varregexplike)
+                                    OR REGEXP_LIKE(c.std_tx_desc.rtr_btch_nb, varregexplike)
+                                    OR REGEXP_LIKE(c.std_tx_desc.orgnl_bk_trac_nb, varregexplike)
+                                    OR REGEXP_LIKE(c.std_tx_desc.orgnl_orgtr_trac_nb, varregexplike)
+                                    OR REGEXP_LIKE(c.full_tx_desc.rtr_bk_trac_nb, varregexplike)
+                                    ELSE CASE
+                                        WHEN c.dtl_bai_cd IN wirescredit THEN -- Wire - Incoming 
+                                        REGEXP_LIKE(c.std_tx_desc.sndr_ref, varregexplike)
+                                        OR REGEXP_LIKE(c.std_tx_desc.sys_ref, varregexplike)
+                                        ELSE CASE
+                                            WHEN c.dtl_bai_cd IN rtpcredit THEN -- Instant Payments -Incoming  
+                                            REGEXP_LIKE(c.std_tx_desc.trac_nb, varregexplike)
+                                            ELSE REGEXP_LIKE(c.std_tx_desc.ref_nb, varregexplike)
+                                        END
+                                    END
+                                END
+                            END
+                        END
+                    )
+                    ELSE CASE
+                        WHEN $search_param = 2 THEN ----Remit
+                        (
+                            CASE
+                                WHEN c.dtl_bai_cd IN achincomingcredit THEN --ACH - Incoming 
+                                REGEXP_LIKE(c.std_tx_desc.ntry_desc, varregexplike)
+                                OR ANY rmt_inf IN c.std_tx_desc.rmt_inf_non_ctx SATISFIES rmt_inf LIKE varlike
+                            END
+                            OR ANY rmt_inf IN c.full_tx_desc.rmt_inf_ctx SATISFIES rmt_inf LIKE varlike END ELSE CASE
+                                WHEN c.dtl_bai_cd IN achsettlecredit THEN --ACH - Outgoing Settlement 
+                                REGEXP_LIKE(c.std_tx_desc.ntry_desc, varregexplike)
+                                ELSE CASE
+                                    WHEN c.dtl_bai_cd IN achreturncredit THEN --ACH - Returns 
+                                    REGEXP_LIKE(c.std_tx_desc.rtr_rsn, varregexplike)
+                                    OR REGEXP_LIKE(c.std_tx_desc.rtr_ntry_desc, varregexplike)
+                                    OR REGEXP_LIKE(c.std_tx_desc.dt_of_dth, varregexplike)
+                                    OR REGEXP_LIKE(c.full_tx_desc.orgnl_ntry_desc, varregexplike)
+                                    OR ANY rmt_inf IN c.full_tx_desc.rmt_inf SATISFIES rmt_inf LIKE varlike
+                                END
+                                ELSE CASE
+                                    WHEN c.dtl_bai_cd IN wirescredit THEN -- Wire - Incoming 
+                                    REGEXP_LIKE(c.std_tx_desc.ref_for_bnfcry, varregexplike)
+                                    OR REGEXP_LIKE(c.std_tx_desc.orgtr_to_bnfcry_ref, varregexplike)
+                                    ELSE CASE
+                                        WHEN c.dtl_bai_cd IN rtpcredit THEN -- Instant Payments -Incoming  
+                                        REGEXP_LIKE(c.std_tx_desc.ref_for_bnfcry, varregexplike)
+                                    END
+                                END
+                            END END END
+                        )
+                        ELSE 1 = 1
+                    END
+                END
+            END
+    )
+SELECT
+    a.*
+FROM
+    cte a
+ORDER BY
+    acct_nb,
+    tx_dt
+LIMIT
+    $limit
+OFFSET
+    $offset
