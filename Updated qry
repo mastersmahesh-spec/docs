@@ -1,0 +1,149 @@
+WITH cte AS (
+    SELECT
+        d.id                                                AS id,
+        d.acct_nb                                           AS acct_nb,
+        d.tx_dt                                             AS tx_dt,
+        c.dtl_bai_cd                                        AS dtl_bai_cd,
+        c.tx_tp                                             AS tx_tp,   -- 'CR' or 'DR' tagged below
+
+        -- Core fields
+        IFMISSING(c.tx_desc,                   "")         AS tx_desc,
+        IFMISSING(c.std_tx_desc.orgtr,         "")         AS orgtr,
+        IFMISSING(c.std_tx_desc.orgnl_rcvr,    "")         AS orgnl_rcvr,
+        IFMISSING(c.std_tx_desc.ref_nb,        "")         AS ref_nb,
+        c.tx_amt                                            AS tx_amt,
+        c.tx_id                                             AS tx_id,
+
+        -- std_tx_desc fields
+        c.std_tx_desc.rcvr                                  AS rcvr,
+        c.std_tx_desc.orgtr_to_bnfcry_ref                  AS orgtr_to_bnfcry_ref,
+        c.std_tx_desc.ref_for_bnfcry                        AS ref_for_bnfcry,
+        c.std_tx_desc.dt_of_dth                             AS dt_of_dth,
+        c.std_tx_desc.rtr_ntry_desc                         AS rtr_ntry_desc,
+        c.std_tx_desc.rtr_rsn                               AS rtr_rsn,
+        c.std_tx_desc.ntry_desc                             AS ntry_desc,
+        c.std_tx_desc.rmt_inf_non_ctx                       AS rmt_inf_non_ctx,
+        c.std_tx_desc.trac_nb                               AS trac_nb,
+        c.std_tx_desc.det_id_nb                             AS det_id_nb,
+        c.std_tx_desc.sys_ref                               AS sys_ref,
+        c.std_tx_desc.sndr_ref                              AS sndr_ref,
+        c.std_tx_desc.btch_nb                               AS btch_nb,
+        c.std_tx_desc.orgtr_trac_nb                         AS orgtr_trac_nb,
+        c.std_tx_desc.orgnl_det_id_nb                       AS orgnl_det_id_nb,
+        c.std_tx_desc.rtr_btch_nb                           AS rtr_btch_nb,
+        c.std_tx_desc.orgnl_bk_trac_nb                     AS orgnl_bk_trac_nb,
+        c.std_tx_desc.orgnl_orgtr_trac_nb                   AS orgnl_orgtr_trac_nb,
+        c.std_tx_desc.orgnl_orgtr                           AS orgnl_orgtr,
+        c.std_tx_desc.bnfcry_nm                             AS bnfcry_nm,
+
+        -- full_tx_desc fields
+        c.full_tx_desc.orgnl_ntry_desc                      AS orgnl_ntry_desc,
+        c.full_tx_desc.rtr_orgtr                             AS rtr_orgtr,
+        c.full_tx_desc.rmt_inf                               AS rmt_inf,
+        c.full_tx_desc.rmt_inf_ctx                           AS rmt_inf_ctx,
+        c.full_tx_desc.rtr_bk_trac_nb                       AS rtr_bk_trac_nb,
+        c.full_tx_desc.rtr_bk_ref                           AS rtr_bk_ref
+
+    FROM (
+        -- ════════════════════════════════════════════════════
+        -- Read collection ONCE. Merge CR + DR into one array.
+        -- Pre-filter to only relevant BAI codes per side.
+        -- Tag each element with tx_tp before merging.
+        -- ════════════════════════════════════════════════════
+        SELECT
+            META(d).id                                      AS id,
+            d.acct_nb,
+            d.pstng_dt                                      AS tx_dt,
+            ARRAY_CONCAT(
+                -- Credits: tag each element as 'CR'
+                ARRAY OBJECT_PUT(elem, "tx_tp", "CR")
+                    FOR elem IN d.acct_cdts.dtl
+                    WHEN elem.dtl_bai_cd IN [
+                        '165',            -- ACH Incoming Credit
+                        '166',            -- ACH Settle Credit
+                        '168', '257',     -- ACH Return Credit
+                        '158',            -- RTP Credit
+                        '195','196','201',
+                        '206','208','227' -- Wire Credit
+                    ]
+                END,
+                -- Debits: tag each element as 'DR'
+                ARRAY OBJECT_PUT(elem, "tx_tp", "DR")
+                    FOR elem IN d.acct_dbts.dtl
+                    WHEN elem.dtl_bai_cd IN [
+                        '455',            -- ACH Incoming Debit
+                        '466',            -- ACH Settle Debit
+                        '468', '557',     -- ACH Return Debit
+                        '458',            -- RTP Debit
+                        '495','496','501',
+                        '506','508','527' -- Wire Debit
+                    ]
+                END
+            ) AS all_tx
+
+        FROM semantic.dhub_standard_reports.daily_statement_detail_priordays AS d
+
+        WHERE d.acct_rtg_nb IN $acct_rtg_nb
+          AND d.pstng_dt = $reportDate
+          -- Skip documents where BOTH arrays are empty
+          AND (d.acct_cdts.ttl_nb_cdts > 0 OR d.acct_dbts.ttl_nb_dbts > 0)
+
+    ) AS d
+    -- Single UNNEST over the merged, pre-filtered array
+    UNNEST d.all_tx AS c
+)
+
+-- ════════════════════════════════════════════════════════════
+-- Search logic applied here using query parameters
+-- CTE above has already done all the heavy lifting
+-- ════════════════════════════════════════════════════════════
+SELECT
+    cte.*,
+    COUNT(*) OVER() AS total_count
+FROM cte
+
+WHERE
+    -- ── Amount filter ──────────────────────────────────────
+    CASE
+        WHEN $amount_param = 1 THEN cte.tx_amt BETWEEN $minamount AND $maxamount
+        WHEN $amount_param = 2 THEN cte.tx_amt = $amount
+        ELSE TRUE
+    END
+
+    -- ── Reference filter ───────────────────────────────────
+    AND CASE
+        WHEN $reference_param = 1 THEN cte.ref_nb BETWEEN $minreference AND $maxreference
+        WHEN $reference_param = 2 THEN cte.ref_nb = $reference
+        ELSE TRUE
+    END
+
+    -- ── Description / Payroll / TranID / Remit search ──────
+    AND CASE
+        WHEN $search_param = 0 THEN     -- Payroll
+            REGEXP_LIKE(cte.orgtr,       $varregexplike)
+            OR REGEXP_LIKE(cte.rcvr,     $varregexplike)
+
+        WHEN $search_param = 1 THEN     -- Transaction ID
+            REGEXP_LIKE(cte.det_id_nb,         $varregexplike)
+            OR REGEXP_LIKE(cte.trac_nb,        $varregexplike)
+            OR REGEXP_LIKE(cte.btch_nb,        $varregexplike)
+            OR REGEXP_LIKE(cte.orgtr_trac_nb,  $varregexplike)
+            OR REGEXP_LIKE(cte.sndr_ref,       $varregexplike)
+            OR REGEXP_LIKE(cte.sys_ref,        $varregexplike)
+            OR REGEXP_LIKE(cte.ref_nb,         $varregexplike)
+
+        WHEN $search_param = 2 THEN     -- Remittance
+            REGEXP_LIKE(cte.ntry_desc,           $varregexplike)
+            OR REGEXP_LIKE(cte.rtr_rsn,          $varregexplike)
+            OR REGEXP_LIKE(cte.rtr_ntry_desc,    $varregexplike)
+            OR REGEXP_LIKE(cte.ref_for_bnfcry,   $varregexplike)
+            OR (ANY r IN cte.rmt_inf_non_ctx     SATISFIES r LIKE $varlike END)
+            OR (ANY r IN cte.rmt_inf_ctx         SATISFIES r LIKE $varlike END)
+            OR (ANY r IN cte.rmt_inf             SATISFIES r LIKE $varlike END)
+
+        ELSE TRUE
+    END
+
+ORDER BY acct_nb, tx_dt
+LIMIT  $limit
+OFFSET $offset;
