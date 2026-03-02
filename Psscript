@@ -1,0 +1,179 @@
+*****************************************************************************
+# Author:        MK
+# Create Date:   03/06/2026
+# Description:   PowerShell test script for Couchbase Eventing Function Deploy
+#                via REST API - Hardcoded values for VSCode testing
+# *****************************************************************************
+# Revision History:
+# Date          By              Reason
+# 03/06/2026    MK              Datahub CICD Process for Couchbase - Test Script
+# *****************************************************************************
+
+# -----------------------------------------------------------------------
+# HARDCODED TEST VALUES - Taken from cb_copy_data.py
+# -----------------------------------------------------------------------
+$RawNode      = "svc-e-node-020.mqosdhkuezm0mlzb.cloud.couchbase.com:8091"
+$Username     = "your-username"           # <-- Replace with actual username
+$Password     = "your-password"           # <-- Replace with actual password
+$CaCertPath   = "C:\Users\MKankipa\certs\capellauat-root-ca.pem"
+$FunctionName = "ev_tps_mq_rtp_ldg_to_proc_dtl_test"
+$OutputDir    = "C:\Users\MKankipa\datahub"
+$Mode         = "export"                  # <-- Set to "export" or "import"
+
+# -----------------------------------------------------------------------
+# Derived values
+# -----------------------------------------------------------------------
+$Host         = $RawNode.Split(":")[0]
+$BaseUrl      = "https://${Host}:18096"
+$JsonFileName = "${FunctionName}.json"
+$JsonFilePath = Join-Path $OutputDir $JsonFileName
+
+Write-Host "========================================="
+Write-Host " Couchbase Eventing Function Tool"
+Write-Host "========================================="
+Write-Host "Host        : $Host"
+Write-Host "Function    : $FunctionName"
+Write-Host "Output Dir  : $OutputDir"
+Write-Host "Mode        : $Mode"
+Write-Host "========================================="
+
+# -----------------------------------------------------------------------
+# Input Validation
+# -----------------------------------------------------------------------
+if ([string]::IsNullOrWhiteSpace($Host) -or
+    [string]::IsNullOrWhiteSpace($Username) -or
+    [string]::IsNullOrWhiteSpace($Password) -or
+    [string]::IsNullOrWhiteSpace($FunctionName)) {
+    Write-Error "One or more required parameters are empty. Please check the hardcoded values."
+    exit 1
+}
+
+if (-not (Test-Path $CaCertPath)) {
+    Write-Warning "CA cert not found at: $CaCertPath - proceeding with -SkipCertificateCheck"
+    $SkipCert = $true
+} else {
+    $SkipCert = $false
+    Write-Host "CA Cert found: $CaCertPath"
+}
+
+# -----------------------------------------------------------------------
+# Function: Get / Export Eventing Function
+# Equivalent to: list_eventing_functions() in Python
+# GET https://{host}:18096/api/v1/functions/{function_name}
+# -----------------------------------------------------------------------
+function Export-EventingFunction {
+    $Url = "$BaseUrl/api/v1/functions/$FunctionName"
+    Write-Host "`n[EXPORT] Fetching eventing function: $FunctionName"
+    Write-Host "URL: $Url"
+
+    try {
+        $Credential = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("${Username}:${Password}"))
+        $Headers = @{
+            "Authorization" = "Basic $Credential"
+            "Content-Type"  = "application/json"
+        }
+
+        if ($SkipCert) {
+            $Response = Invoke-WebRequest -Uri $Url -Method GET -Headers $Headers -SkipCertificateCheck
+        } else {
+            $Response = Invoke-WebRequest -Uri $Url -Method GET -Headers $Headers
+        }
+
+        Write-Host "HTTP Status: $($Response.StatusCode)"
+
+        if ($Response.StatusCode -eq 200) {
+            # Ensure output directory exists
+            if (-not (Test-Path $OutputDir)) {
+                New-Item -ItemType Directory -Path $OutputDir | Out-Null
+                Write-Host "Created output directory: $OutputDir"
+            }
+
+            # Save to JSON file
+            $Response.Content | Out-File -FilePath $JsonFilePath -Encoding utf8
+            Write-Host "[SUCCESS] Eventing function exported to: $JsonFilePath"
+        } else {
+            Write-Error "[ERROR] Failed to export eventing function. HTTP $($Response.StatusCode)"
+            exit 1
+        }
+    }
+    catch {
+        Write-Error "[ERROR] Exception during export: $_"
+        exit 1
+    }
+}
+
+# -----------------------------------------------------------------------
+# Function: Import / Upsert Eventing Function
+# Equivalent to: import_eventing_function_from_file() in Python
+# POST https://{host}:18096/api/v1/functions/{fn_name}
+# -----------------------------------------------------------------------
+function Import-EventingFunction {
+    Write-Host "`n[IMPORT] Importing eventing function from: $JsonFilePath"
+
+    # Validate JSON file exists
+    if (-not (Test-Path $JsonFilePath)) {
+        Write-Error "[ERROR] JSON file not found: $JsonFilePath"
+        exit 1
+    }
+
+    # Read and parse JSON
+    $Definition = Get-Content -Raw -Path $JsonFilePath | ConvertFrom-Json
+    $FnName     = $Definition.appname
+
+    if ([string]::IsNullOrWhiteSpace($FnName)) {
+        Write-Error "[ERROR] JSON does not contain 'appname' field."
+        exit 1
+    }
+
+    Write-Host "Function appname from JSON: $FnName"
+
+    $Url = "$BaseUrl/api/v1/functions/$FnName"
+    Write-Host "URL: $Url"
+
+    try {
+        $Credential = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("${Username}:${Password}"))
+        $Headers = @{
+            "Authorization" = "Basic $Credential"
+            "Content-Type"  = "application/json"
+        }
+
+        $Body = Get-Content -Raw -Path $JsonFilePath
+
+        if ($SkipCert) {
+            $Response = Invoke-WebRequest -Uri $Url -Method POST -Headers $Headers -Body $Body -SkipCertificateCheck
+        } else {
+            $Response = Invoke-WebRequest -Uri $Url -Method POST -Headers $Headers -Body $Body
+        }
+
+        Write-Host "HTTP Status: $($Response.StatusCode)"
+
+        if ($Response.StatusCode -eq 200) {
+            Write-Host "[SUCCESS] Eventing function '$FnName' imported/upserted successfully."
+        } else {
+            Write-Error "[ERROR] Failed to import eventing function. HTTP $($Response.StatusCode)"
+            exit 1
+        }
+    }
+    catch {
+        Write-Error "[ERROR] Exception during import: $_"
+        exit 1
+    }
+}
+
+# -----------------------------------------------------------------------
+# Main Execution - Switch based on Mode
+# -----------------------------------------------------------------------
+switch ($Mode.ToLower()) {
+    "export" {
+        Export-EventingFunction
+    }
+    "import" {
+        Import-EventingFunction
+    }
+    default {
+        Write-Error "Invalid Mode: '$Mode'. Use 'export' or 'import'."
+        exit 1
+    }
+}
+
+Write-Host "`nFinished executing Eventing Function script successfully."
