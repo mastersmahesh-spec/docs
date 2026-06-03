@@ -1,0 +1,81 @@
+import time
+import json
+import datetime
+import signal
+import sys
+from couchbase.cluster import Cluster
+from couchbase.options import ClusterOptions, QueryOptions
+from couchbase.auth import PasswordAuthenticator
+import pandas as pd
+
+# --- Config ---
+CB_HOST = "couchbases://your-capella-endpoint"
+CB_USER = "your-user"
+CB_PASS = "your-password"
+POLL_INTERVAL_SECS = 2
+OUTPUT_JSON = "active_requests.json"
+OUTPUT_XLSX = "active_requests.xlsx"
+
+# --- State ---
+records = []
+running = True
+
+def signal_handler(sig, frame):
+    global running
+    print("\nStopping capture...")
+    running = False
+
+signal.signal(signal.SIGINT, signal_handler)
+
+# --- Connect ---
+auth = PasswordAuthenticator(CB_USER, CB_PASS)
+cluster = Cluster(CB_HOST, ClusterOptions(auth))
+cluster.wait_until_ready(datetime.timedelta(seconds=10))
+
+print(f"Polling active_requests every {POLL_INTERVAL_SECS}s. Ctrl+C to stop.")
+
+while running:
+    ts = datetime.datetime.utcnow().isoformat()
+    try:
+        result = cluster.query(
+            "SELECT * FROM system:active_requests",
+            QueryOptions(timeout=datetime.timedelta(seconds=5))
+        )
+        rows = [row for row in result]
+        snapshot = {
+            "timestamp": ts,
+            "active_count": len(rows),
+            "requests": rows
+        }
+        records.append(snapshot)
+
+        # Append to JSON file incrementally
+        with open(OUTPUT_JSON, "w") as f:
+            json.dump(records, f, indent=2, default=str)
+
+        print(f"[{ts}] Active requests: {len(rows)}")
+
+    except Exception as e:
+        print(f"[{ts}] Query error: {e}")
+        records.append({"timestamp": ts, "error": str(e)})
+
+    time.sleep(POLL_INTERVAL_SECS)
+
+# --- Post-run: flatten to Excel ---
+print("Converting to Excel...")
+flat_rows = []
+for snap in records:
+    if "requests" in snap:
+        if snap["requests"]:
+            for req in snap["requests"]:
+                row = {"timestamp": snap["timestamp"], "active_count": snap["active_count"]}
+                row.update(req)
+                flat_rows.append(row)
+        else:
+            flat_rows.append({"timestamp": snap["timestamp"], "active_count": 0})
+    elif "error" in snap:
+        flat_rows.append({"timestamp": snap["timestamp"], "active_count": "ERROR", "error": snap["error"]})
+
+df = pd.DataFrame(flat_rows)
+df.to_excel(OUTPUT_XLSX, index=False)
+print(f"Done. JSON: {OUTPUT_JSON} | Excel: {OUTPUT_XLSX}")
