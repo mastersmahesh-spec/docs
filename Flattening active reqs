@@ -1,0 +1,90 @@
+import json
+import re
+import pandas as pd
+
+INPUT_JSON = "active_requests.json"
+OUTPUT_XLSX = "active_requests_flat.xlsx"
+
+def parse_duration_ms(value):
+    if not value:
+        return None
+    match = re.match(r"([\d.]+)(ns|us|µs|ms|s)", str(value).strip())
+    if not match:
+        return None
+    num, unit = float(match.group(1)), match.group(2)
+    return round(num * {"ns": 0.000001, "us": 0.001, "µs": 0.001, "ms": 1.0, "s": 1000.0}[unit], 4)
+
+with open(INPUT_JSON) as f:
+    data = json.load(f)
+
+flat_rows = []
+
+for snap in data:
+    ts = snap.get("timestamp")
+    active_count = snap.get("active_count")
+    requests = snap.get("active_requests") or snap.get("requests") or []
+
+    if isinstance(requests, str):
+        try:
+            requests = json.loads(requests)
+        except Exception:
+            continue
+
+    if not isinstance(requests, list):
+        requests = [requests]
+
+    for req in requests:
+        if isinstance(req, str):
+            try:
+                req = json.loads(req)
+            except Exception:
+                continue
+
+        phase_times = req.get("phaseTimes") or {}
+        phase_counts = req.get("phaseCounts") or {}
+        phase_ops = req.get("phaseOperators") or {}
+
+        row = {
+            "poll_timestamp":   ts,
+            "active_count":     active_count,
+            "preparedName":     req.get("preparedName"),
+            "requestId":        req.get("requestId"),
+            "requestTime":      req.get("requestTime"),
+            "state":            req.get("state"),
+            "elapsedTime_ms":   parse_duration_ms(req.get("elapsedTime")),
+            "executionTime_ms": parse_duration_ms(req.get("executionTime")),
+            "cpuTime_ms":       parse_duration_ms(req.get("cpuTime")),
+            "resultCount":      req.get("resultCount"),
+            "resultSize":       req.get("resultSize"),
+            "usedMemory":       req.get("usedMemory"),
+            "scanConsistency":  req.get("scanConsistency"),
+            "remoteAddr":       req.get("remoteAddr"),
+            "userAgent":        req.get("userAgent"),
+            "statement":        str(req.get("preparedText") or req.get("statement") or "")[:300],
+
+            # Phase times (ms)
+            "phase_authorize_ms":   parse_duration_ms(phase_times.get("authorize")),
+            "phase_parse_ms":       parse_duration_ms(phase_times.get("parse")),
+            "phase_plan_ms":        parse_duration_ms(phase_times.get("plan")),
+            "phase_instantiate_ms": parse_duration_ms(phase_times.get("instantiate")),
+            "phase_indexScan_ms":   parse_duration_ms(phase_times.get("indexScan")),
+            "phase_fetch_ms":       parse_duration_ms(phase_times.get("fetch")),
+            "phase_filter_ms":      parse_duration_ms(phase_times.get("filter")),
+            "phase_project_ms":     parse_duration_ms(phase_times.get("project")),
+            "phase_stream_ms":      parse_duration_ms(phase_times.get("stream")),
+
+            # Phase counts (how many docs touched per phase)
+            "count_fetch":          phase_counts.get("fetch"),
+            "count_indexScan":      phase_counts.get("indexScan"),
+            "count_filter":         phase_counts.get("filter"),
+        }
+        flat_rows.append(row)
+
+df = pd.DataFrame(flat_rows)
+
+# Sort worst fetch time first
+if "phase_fetch_ms" in df.columns:
+    df = df.sort_values("phase_fetch_ms", ascending=False)
+
+df.to_excel(OUTPUT_XLSX, index=False)
+print(f"Done. {len(df)} rows -> {OUTPUT_XLSX}")
