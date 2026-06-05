@@ -1,0 +1,139 @@
+-- Branch 1: daily_statement_detail_priordays CREDITS
+SELECT
+  d.acct_nb                                    AS acct_nb,
+  d.pstng_dt                                   AS tx_dt,
+  c.dtl_bai_cd                                 AS dtl_bai_cd,
+  'CR'                                         AS tx_tp,
+  IFMISSING(c.tx_desc, "")                     AS tx_desc,
+  IFMISSING(c.std_tx_desc.ref_nb, "")          AS ref_nb,
+  c.tx_amt                                     AS tx_amt,
+  c.tx_id                                      AS tx_id,
+  CASE
+    WHEN c.dtl_bai_cd IN ['165']               THEN IFMISSING(c.std_tx_desc.orgtr, "")
+    WHEN c.dtl_bai_cd IN ['166']               THEN IFMISSING(c.std_tx_desc.orgtr, "")
+    WHEN c.dtl_bai_cd IN ['168','257']         THEN IFMISSING(c.std_tx_desc.orgnl_rcvr, "")
+    WHEN c.dtl_bai_cd IN ['195','196','201',
+                           '206','208','227']   THEN IFMISSING(c.std_tx_desc.orgtr, "")
+    WHEN c.dtl_bai_cd = '158'                  THEN IFMISSING(c.std_tx_desc.orgtr, "")
+    ELSE ""
+  END                                           AS orgtr_rcvr
+
+FROM semantic.dhub_standard_reports.daily_statement_detail_priordays AS d
+  USE INDEX (idx_dsdp_cdts_covering_v2)          -- force the new index
+UNNEST d.acct_cdts.dtl AS c
+
+WHERE d.acct_rtg_nb IN $acct_rtg_nb             -- hits index leading key
+  AND d.pstng_dt BETWEEN $startDate AND $endDate -- hits index second key
+  AND c.bh_pdct_ctgy IN $bh_pdct_ctgy           -- resolved in array index
+  AND c.dtl_bai_cd IN                            -- pre-filter: only credit BAI codes
+      ['165','166','168','257','158',
+       '195','196','201','206','208','227']
+
+  -- Amount filter: only evaluate when param is active
+  AND (
+    $amount_param = 0
+    OR ($amount_param = 1
+        AND TO_NUMBER(c.tx_amt) BETWEEN TO_NUMBER($minamount) AND TO_NUMBER($maxamount))
+    OR ($amount_param = 2
+        AND TO_NUMBER(c.tx_amt) = TO_NUMBER($amount))
+  )
+
+  -- Reference filter: only evaluate when param is active
+  AND (
+    $reference_param = 0
+    OR ($reference_param = 1
+        AND TO_NUMBER(c.std_tx_desc.ref_nb)
+            BETWEEN TO_NUMBER($minreference) AND TO_NUMBER($maxreference))
+    OR ($reference_param = 2
+        AND TO_NUMBER(c.std_tx_desc.ref_nb) = TO_NUMBER($reference))
+  )
+
+  -- Text search: flat OR conditions instead of nested CASE
+  AND (
+    $search_param NOT IN [0, 1, 2]   -- no search: pass all through
+
+    OR ($search_param = 0 AND (      -- payroll / name search
+          (c.dtl_bai_cd = '165'
+            AND (REGEXP_LIKE(c.std_tx_desc.orgtr, $varregexplike)
+              OR REGEXP_LIKE(c.std_tx_desc.rcvr,  $varregexplike)))
+       OR (c.dtl_bai_cd = '166'
+            AND REGEXP_LIKE(c.std_tx_desc.orgtr, $varregexplike))
+       OR (c.dtl_bai_cd IN ['168','257']
+            AND (REGEXP_LIKE(c.std_tx_desc.orgnl_rcvr,  $varregexplike)
+              OR REGEXP_LIKE(c.std_tx_desc.orgnl_orgtr,  $varregexplike)
+              OR REGEXP_LIKE(c.full_tx_desc.rtr_orgtr,   $varregexplike)))
+       OR (c.dtl_bai_cd IN ['195','196','201','206','208','227']
+            AND REGEXP_LIKE(c.std_tx_desc.orgtr, $varregexplike))
+       OR (c.dtl_bai_cd = '158'
+            AND REGEXP_LIKE(c.std_tx_desc.orgtr, $varregexplike))
+    ))
+
+    OR ($search_param = 1 AND (      -- transaction id search
+          (c.dtl_bai_cd = '165'
+            AND (REGEXP_LIKE(c.std_tx_desc.det_id_nb, $varregexplike)
+              OR REGEXP_LIKE(c.std_tx_desc.trac_nb,   $varregexplike)))
+       OR (c.dtl_bai_cd = '166'
+            AND (REGEXP_LIKE(c.std_tx_desc.btch_nb,       $varregexplike)
+              OR REGEXP_LIKE(c.std_tx_desc.orgtr_trac_nb, $varregexplike)))
+       OR (c.dtl_bai_cd IN ['168','257']
+            AND (REGEXP_LIKE(c.std_tx_desc.orgnl_det_id_nb,   $varregexplike)
+              OR REGEXP_LIKE(c.std_tx_desc.rtr_btch_nb,        $varregexplike)
+              OR REGEXP_LIKE(c.std_tx_desc.orgnl_bk_trac_nb,   $varregexplike)
+              OR REGEXP_LIKE(c.std_tx_desc.orgnl_orgtr_trac_nb,$varregexplike)
+              OR REGEXP_LIKE(c.full_tx_desc.rtr_bk_trac_nb,    $varregexplike)))
+       OR (c.dtl_bai_cd IN ['195','196','201','206','208','227']
+            AND (REGEXP_LIKE(c.std_tx_desc.sndr_ref, $varregexplike)
+              OR REGEXP_LIKE(c.std_tx_desc.sys_ref,  $varregexplike)))
+       OR (c.dtl_bai_cd = '158'
+            AND REGEXP_LIKE(c.std_tx_desc.trac_nb, $varregexplike))
+    ))
+
+    OR ($search_param = 2 AND (      -- remittance search
+          (c.dtl_bai_cd = '165'
+            AND (REGEXP_LIKE(c.std_tx_desc.ntry_desc, $varregexplike)
+              OR ANY r IN c.std_tx_desc.rmt_inf_non_ctx SATISFIES r LIKE $varlike END
+              OR ANY r IN c.full_tx_desc.rmt_inf_ctx    SATISFIES r LIKE $varlike END))
+       OR (c.dtl_bai_cd = '166'
+            AND REGEXP_LIKE(c.std_tx_desc.ntry_desc, $varregexplike))
+       OR (c.dtl_bai_cd IN ['168','257']
+            AND (REGEXP_LIKE(c.std_tx_desc.rtr_rsn,         $varregexplike)
+              OR REGEXP_LIKE(c.std_tx_desc.rtr_ntry_desc,   $varregexplike)
+              OR REGEXP_LIKE(c.std_tx_desc.dt_of_dth,       $varregexplike)
+              OR REGEXP_LIKE(c.full_tx_desc.orgnl_ntry_desc,$varregexplike)
+              OR ANY r IN c.full_tx_desc.rmt_inf SATISFIES r LIKE $varlike END))
+       OR (c.dtl_bai_cd IN ['195','196','201','206','208','227']
+            AND (REGEXP_LIKE(c.std_tx_desc.ref_for_bnfcry,      $varregexplike)
+              OR REGEXP_LIKE(c.std_tx_desc.orgtr_to_bnfcry_ref, $varregexplike)))
+       OR (c.dtl_bai_cd = '158'
+            AND REGEXP_LIKE(c.std_tx_desc.ref_for_bnfcry, $varregexplike))
+    ))
+  );
+
+-- Drop this if it exists (it's being ignored anyway):
+-- idx_daily_statement_detail_priordays_bh_pdct_ctgy_cdts_tx_amt_acct_rtg_nb_pstng_dt
+
+-- Create new index with acct_rtg_nb + pstng_dt LEADING,
+-- array expression as the array component,
+-- and include the fields needed so Fetch can be eliminated
+
+CREATE INDEX idx_dsdp_cdts_covering_v2
+ON `semantic`.`dhub_standard_reports`.`daily_statement_detail_priordays`
+(
+  `acct_rtg_nb`,                          -- leading: index seek by account
+  `pstng_dt`,                             -- second: range filter on date
+  ALL ARRAY FLATTEN_KEYS(
+    c.`bh_pdct_ctgy`,                     -- array filter: product category
+    c.`dtl_bai_cd`,                       -- array filter: BAI code (no conversion needed)
+    TO_NUMBER(c.`tx_amt`),                -- array filter: amount range
+    TO_NUMBER(c.`std_tx_desc`.`ref_nb`),  -- array filter: reference range
+    c.`tx_desc`,                          -- covered: avoid fetch for projection
+    c.`tx_id`,                            -- covered: avoid fetch for projection
+    c.`std_tx_desc`.`orgtr`,              -- covered: search field
+    c.`std_tx_desc`.`rcvr`,              -- covered: search field
+    c.`std_tx_desc`.`ref_nb`             -- covered: projection (string form)
+  ) FOR c IN `acct_cdts`.`dtl` END
+)
+WHERE `acct_cdts` IS NOT MISSING;        -- partial index: skip docs with no credits
+
+
+
