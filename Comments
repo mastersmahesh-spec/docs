@@ -1,0 +1,10 @@
+From a technical standpoint, DataHub RPO is near zero across all four source systems:
+
+- FIS/Confluent: Data is retained in Confluent topics and can be replayed from the last committed offset. No data loss.
+- RTP/FedNow: Messages are persisted in MQ broker and can be replayed. No data loss.
+- ACH: File based — source files always exist on the file system. Can be reprocessed from the point of failure. No data loss.
+- Batch EOD: Source data is intact. Batch can be reprocessed after DR recovery. No data loss.
+
+Additionally, XDCR continuously replicates data in near real-time to our DR cluster in East US 2, covering any in-flight data at the point of failure.
+
+The distinction here is RPO vs RTO. We do not lose data in any scenario — the question is how long recovery takes (RTO), not whether data is lost (RPO). Based on this, committing to 0-15 min RPO is technically accurate and defensible.
