@@ -1,0 +1,602 @@
+"""
+BHUB Couchbase Load Test Script
+Simulates hourly API call distribution across Balance Position,
+Daily Statement, and User Defined reports against Couchbase Capella.
+"""
+
+import random
+import time
+import threading
+import json
+import pandas as pd
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
+from couchbase.cluster import Cluster
+from couchbase.options import ClusterOptions, QueryOptions, QueryProfile
+from couchbase.auth import PasswordAuthenticator
+
+# ═══════════════════════════════════════════════════════════════
+# 1. CLUSTER CONNECTION
+# ═══════════════════════════════════════════════════════════════
+USERNAME         = "your_username"
+PASSWORD         = "your_password"
+CAPELLA_ENDPOINT = "couchbases://your-endpoint.cloud.couchbase.com"
+
+auth    = PasswordAuthenticator(USERNAME, PASSWORD)
+cluster = Cluster(CAPELLA_ENDPOINT, ClusterOptions(auth))
+cluster.wait_until_ready(timeout=30)
+print("Connected to Couchbase Capella")
+
+# ═══════════════════════════════════════════════════════════════
+# 2. TEST CONFIG
+# ═══════════════════════════════════════════════════════════════
+ACCOUNTS_PER_CALL = 11
+CUSTOM_START      = "2025-03-01"
+CUSTOM_END        = "2025-03-31"
+
+# Switch between scenarios
+SCENARIO = "scenario_1"   # "scenario_1" = 40/60 | "scenario_2" = 60/40
+
+SCENARIOS = {
+    "scenario_1": {
+        "label": "40pct_Reports_60pct_Search",
+        "weights": {
+            "Balance Position" : 0.133,
+            "Daily Statement"  : 0.133,
+            "User Defined"     : 0.134,
+            "Transaction Search": 0.60
+        }
+    },
+    "scenario_2": {
+        "label": "60pct_Reports_40pct_Search",
+        "weights": {
+            "Balance Position" : 0.20,
+            "Daily Statement"  : 0.20,
+            "User Defined"     : 0.20,
+            "Transaction Search": 0.40
+        }
+    }
+}
+
+# Hourly call volumes from your Excel distribution
+HOURLY_CONFIG = {
+    "08": {"total_calls": 19375, "duration_min": 60},
+    "09": {"total_calls": 19375, "duration_min": 60},
+    "10": {"total_calls": 18449, "duration_min": 60},
+    "11": {"total_calls": 14746, "duration_min": 60},
+    "12": {"total_calls": 13820, "duration_min": 60},
+    "13": {"total_calls": 13820, "duration_min": 60},
+    "14": {"total_calls": 13820, "duration_min": 60},
+    "15": {"total_calls": 17523, "duration_min": 60},
+    "16": {"total_calls": 18449, "duration_min": 60},
+    "17": {"total_calls": 19375, "duration_min": 60},
+}
+
+# Compute target RPS per hour
+for hour, config in HOURLY_CONFIG.items():
+    config["target_rps"] = round(
+        config["total_calls"] / (config["duration_min"] * 60), 4
+    )
+
+# ═══════════════════════════════════════════════════════════════
+# 3. ACCOUNT LIST
+# ═══════════════════════════════════════════════════════════════
+acct_rtg_list = [
+    "0000148899|075917843",
+    "0000179597|075917843",
+    "0085340980|075917843",
+    "0850087384|071925567",
+    "8981615977|071925567",
+    "8981615985|071925567",
+    "0550022716|071925651",
+    "0550744258|071925651",
+    "0550755896|071925651",
+    "2270386434|072413845",
+    "2270386442|072413845",
+    # Add more accounts here
+]
+
+# ═══════════════════════════════════════════════════════════════
+# 4. REPORT DEFINITIONS
+# ═══════════════════════════════════════════════════════════════
+BH_PDCT_CTGY = [
+    "Instant Payments",
+    "ACH - Incoming",
+    "ACH - Outgoing",
+    "Corporate Deposits",
+    "Misc Activity",
+    "Zero Balance Accounts",
+    "Loan Services"
+]
+
+# ── Balance Position ─────────────────────────────────────────
+BP_MAPPING = [
+    # (report_name, statement, rpt_tp)
+    ("Balance Position Sameday",
+     "ups_bhub_req_bp_sameday",
+     "sameday"),
+
+    ("Balance Position PriorDays-PRIORDAY",
+     "ups_bhub_req_bp_priordays",
+     "PRIOR_DAY"),
+
+    ("Balance Position Priordays-Month-to-Date",
+     "ups_bhub_req_bp_priordays",
+     "MONTH_TO_DATE"),
+
+    ("Balance Position Priordays-Prior-Month",
+     "ups_bhub_req_bp_priordays",
+     "PRIOR_MONTH"),
+
+    ("Balance Position PriorDays-Custom",
+     "ups_bhub_req_bp_priordays_range",
+     "CUSTOM"),
+]
+
+# ── Daily Statement ──────────────────────────────────────────
+DS_MAPPING = [
+    ("dailystatementreport-basic-priordays-PRIOR_DAY",
+     "ups_bhub_req_daily_stmt_basic",
+     "PRIOR_DAY"),
+
+    ("dailystatementreport-basic-priordays-MONTH_TO_DATE",
+     "ups_bhub_req_daily_stmt_basic",
+     "MONTH_TO_DATE"),
+
+    ("dailystatementreport-basic-priordays-PRIOR_MONTH",
+     "ups_bhub_req_daily_stmt_basic",
+     "PRIOR_MONTH"),
+
+    ("dailystatementreport-basic-priordays-CUSTOM",
+     "ups_bhub_req_daily_stmt_basic",
+     "CUSTOM"),
+
+    ("dailystatementreport-full-priordays-PRIOR_DAY",
+     "ups_bhub_req_daily_stmt_full",
+     "PRIOR_DAY"),
+
+    ("dailystatementreport-full-priordays-PRIOR_MONTH",
+     "ups_bhub_req_daily_stmt_full",
+     "PRIOR_MONTH"),
+
+    ("dailystatementreport-full-priordays-MONTH_TO_DATE",
+     "ups_bhub_req_daily_stmt_full",
+     "MONTH_TO_DATE"),
+
+    ("dailystatementreport-full-priordays-CUSTOM",
+     "ups_bhub_req_daily_stmt_full",
+     "CUSTOM"),
+
+    ("dailystatementreport-standard-priordays-PRIOR_DAY",
+     "ups_bhub_req_daily_stmt_standard",
+     "PRIOR_DAY"),
+
+    ("dailystatementreport-standard-priordays-PRIOR_MONTH",
+     "ups_bhub_req_daily_stmt_standard",
+     "PRIOR_MONTH"),
+
+    ("dailystatementreport-summary-priordays-PRIOR_DAY",
+     "ups_bhub_req_daily_stmt_summary",
+     "PRIOR_DAY"),
+
+    ("dailystatementreport-summary-priordays-PRIOR_MONTH",
+     "ups_bhub_req_daily_stmt_summary",
+     "PRIOR_MONTH"),
+]
+
+# ── User Defined ─────────────────────────────────────────────
+UD_MAPPING = [
+    # (report_name, statement, rpt_tp, acct_sts)
+    ("User-Defined-Product-Summary-Current",
+     "ups_bhub_req_ud_pdct_ctgy_filter_summary_sameday",
+     "ud_pdct_summary_current", 1),
+
+    ("User-Defined-Product-Summary-Debit-Current",
+     "ups_bhub_req_ud_pdct_ctgy_filter_summary_dbt_sameday",
+     "ud_pdct_summary_dbt_current", 2),
+
+    ("User-Defined-Product-Summary-Credit-Current",
+     "ups_bhub_req_ud_pdct_ctgy_filter_summary_cdt_sameday",
+     "ud_pdct_summary_cdt_current", 3),
+
+    ("User-Defined-Product-Summary-Priorday",
+     "ups_bhub_req_ud_pdct_ctgy_filter_summary_priordays",
+     "ud_pdct_summary_priorday", 1),
+
+    ("User-Defined-Product-Summary-Debit-Priorday",
+     "ups_bhub_req_ud_pdct_ctgy_filter_summary_dbt_priordays",
+     "ud_pdct_summary_dbt_priorday", 2),
+
+    ("User-Defined-Product-Summary-Credit-Priorday",
+     "ups_bhub_req_ud_pdct_ctgy_filter_summary_cdt_priordays",
+     "ud_pdct_summary_cdt_priorday", 3),
+
+    ("User-Defined-Product-Summary-Month-to-date_Prior-Month_Custom",
+     "ups_bhub_req_ud_pdct_ctgy_filter_summary_priordays_range",
+     "ud_pdct_summary_custom", 1),
+
+    ("User-Defined-Product-Summary-Debit-Month-to-date_Prior-Month_Custom",
+     "ups_bhub_req_ud_pdct_ctgy_filter_summary_dbt_priordays_range",
+     "ud_pdct_summary_dbt_custom", 2),
+
+    ("User-Defined-Product-Summary-Credit-Month-to-date_Prior-Month_Custom",
+     "ups_bhub_req_ud_pdct_ctgy_filter_summary_cdt_priordays_range",
+     "ud_pdct_summary_cdt_custom", 3),
+]
+
+# ── Build REPORTS dict dynamically ───────────────────────────
+def build_bp_params(statement, rpt_tp):
+    def params(accts):
+        p = {"acct_rtg_nb": accts, "rpt_tp": rpt_tp}
+        if "range" in statement:
+            p["startDate"] = CUSTOM_START
+            p["endDate"]   = CUSTOM_END
+        return p
+    return params
+
+def build_ds_params(statement, rpt_tp):
+    def params(accts):
+        p = {"acct_rtg_nb": accts, "rpt_tp": rpt_tp}
+        if "range" in statement or rpt_tp == "CUSTOM":
+            p["startDate"] = CUSTOM_START
+            p["endDate"]   = CUSTOM_END
+        return p
+    return params
+
+def build_ud_params(statement, rpt_tp, acct_sts):
+    def params(accts):
+        p = {
+            "acct_rtg_nb" : accts,
+            "rpt_tp"      : rpt_tp,
+            "acct_sts"    : acct_sts,
+            "bh_pdct_ctgy": BH_PDCT_CTGY
+        }
+        if "range" in statement:
+            p["startDate"] = CUSTOM_START
+            p["endDate"]   = CUSTOM_END
+        return p
+    return params
+
+REPORTS = {}
+
+for name, stmt, rpt_tp in BP_MAPPING:
+    REPORTS[name] = {"statement": stmt, "params": build_bp_params(stmt, rpt_tp)}
+
+for name, stmt, rpt_tp in DS_MAPPING:
+    REPORTS[name] = {"statement": stmt, "params": build_ds_params(stmt, rpt_tp)}
+
+for name, stmt, rpt_tp, acct_sts in UD_MAPPING:
+    REPORTS[name] = {"statement": stmt, "params": build_ud_params(stmt, rpt_tp, acct_sts)}
+
+# ── Report groups for weighted selection ─────────────────────
+REPORT_GROUPS = {
+    "Balance Position": [r[0] for r in BP_MAPPING],
+    "Daily Statement" : [r[0] for r in DS_MAPPING],
+    "User Defined"    : [r[0] for r in UD_MAPPING],
+    "Transaction Search": [],  # add tomorrow
+}
+
+# ═══════════════════════════════════════════════════════════════
+# 5. HELPERS
+# ═══════════════════════════════════════════════════════════════
+def timedelta_to_ms(td):
+    return round(td.total_seconds() * 1000, 3) if td else None
+
+def _to_ms(duration_str):
+    if not duration_str:
+        return None
+    try:
+        if duration_str.endswith("ms"):
+            return round(float(duration_str[:-2]), 3)
+        elif duration_str.endswith("us"):
+            return round(float(duration_str[:-2]) / 1000, 3)
+        elif duration_str.endswith("s") and not duration_str.endswith("ms"):
+            return round(float(duration_str[:-1]) * 1000, 3)
+        elif duration_str.endswith("ns"):
+            return round(float(duration_str[:-2]) / 1_000_000, 3)
+    except:
+        return None
+
+def pick_report(weights):
+    groups       = [g for g, w in weights.items() if REPORT_GROUPS.get(g)]
+    group_wts    = [weights[g] for g in groups]
+    chosen_group = random.choices(groups, weights=group_wts, k=1)[0]
+    return random.choice(REPORT_GROUPS[chosen_group]), chosen_group
+
+# ═══════════════════════════════════════════════════════════════
+# 6. SHARED STATE
+# ═══════════════════════════════════════════════════════════════
+all_rows       = []        # buffered results
+lock           = threading.Lock()
+fired_count    = 0         # total queries fired (thread-safe)
+fired_lock     = threading.Lock()
+error_count    = 0
+error_lock     = threading.Lock()
+
+# ═══════════════════════════════════════════════════════════════
+# 7. EXECUTE SINGLE REPORT
+# ═══════════════════════════════════════════════════════════════
+def execute_report(query_id, report_name, group_name, hour_label):
+    global fired_count, error_count
+
+    report = REPORTS.get(report_name)
+    if not report:
+        return
+
+    sample = random.sample(acct_rtg_list, min(ACCOUNTS_PER_CALL, len(acct_rtg_list)))
+    start  = time.time()
+    status = "SUCCESS"
+    rows   = []
+    metrics_dict = {}
+    phase_dict   = {}
+
+    try:
+        result = cluster.query(
+            f"EXECUTE {report['statement']}",
+            QueryOptions(
+                named_parameters=report["params"](sample),
+                profile=QueryProfile.PHASES
+            )
+        )
+        rows = list(result)
+
+        meta    = result.metadata()
+        metrics = meta.metrics()
+        profile = meta.profile() or {}
+
+        metrics_dict = {
+            "elapsed_ms"   : timedelta_to_ms(metrics.elapsed_time()),
+            "execution_ms" : timedelta_to_ms(metrics.execution_time()),
+            "result_count" : int(metrics.result_count()),
+            "payload_kb"   : round(int(metrics.result_size()) / 1024, 3),
+            "error_count"  : int(metrics.error_count()),
+            "sort_count"   : int(metrics.sort_count()),
+        }
+
+        phase_times  = profile.get("phaseTimes",  {})
+        phase_counts = profile.get("phaseCounts", {})
+
+        phase_dict = {
+            "phase_authorize_ms"  : _to_ms(phase_times.get("authorize")),
+            "phase_parse_ms"      : _to_ms(phase_times.get("parse")),
+            "phase_plan_ms"       : _to_ms(phase_times.get("plan")),
+            "phase_index_scan_ms" : _to_ms(phase_times.get("indexScan")),
+            "phase_fetch_ms"      : _to_ms(phase_times.get("fetch")),
+            "phase_filter_ms"     : _to_ms(phase_times.get("filter")),
+            "phase_project_ms"    : _to_ms(phase_times.get("project")),
+            "phase_stream_ms"     : _to_ms(phase_times.get("stream")),
+            "count_index_scan"    : phase_counts.get("indexScan"),
+            "count_fetch"         : phase_counts.get("fetch"),
+            "count_project"       : phase_counts.get("project"),
+        }
+
+    except Exception as e:
+        status = f"ERROR: {str(e)[:150]}"
+        with error_lock:
+            error_count += 1
+
+    wall_sec = round(time.time() - start, 6)
+
+    with lock:
+        all_rows.append({
+            # Identity
+            "query_id"   : query_id,
+            "hour"       : hour_label,
+            "group"      : group_name,
+            "report"     : report_name,
+            "statement"  : report["statement"],
+            "timestamp"  : datetime.now().isoformat(),
+            "status"     : status,
+            "wall_sec"   : wall_sec,
+            "accounts"   : sample,
+            # Metrics
+            **metrics_dict,
+            # Phase timings
+            **phase_dict,
+            # Actual rows
+            "rows"       : rows
+        })
+
+    with fired_lock:
+        fired_count += 1
+
+# ═══════════════════════════════════════════════════════════════
+# 8. HOURLY WAVE RUNNER (rate-controlled)
+# ═══════════════════════════════════════════════════════════════
+def run_hour_wave(hour_label, config, weights):
+    target_rps   = config["target_rps"]
+    total_calls  = config["total_calls"]
+    duration_sec = config["duration_min"] * 60
+    interval     = 1.0 / target_rps   # seconds between launches
+    MAX_CONCURRENT = 20                # semaphore cap
+
+    print(f"\n{'='*65}")
+    print(f"  Hour         : {hour_label}:00")
+    print(f"  Target calls : {total_calls:,}")
+    print(f"  Target RPS   : {target_rps}")
+    print(f"  Interval     : {round(interval, 3)}s between launches")
+    print(f"  Max concurrent: {MAX_CONCURRENT} threads")
+    print(f"{'='*65}")
+
+    semaphore   = threading.Semaphore(MAX_CONCURRENT)
+    hour_fired  = 0
+    hour_start  = time.time()
+    threads     = []
+
+    def fire(query_id, report_name, group_name):
+        with semaphore:
+            execute_report(query_id, report_name, group_name, hour_label)
+
+    while hour_fired < total_calls and (time.time() - hour_start) < duration_sec:
+        report_name, group_name = pick_report(weights)
+        t = threading.Thread(
+            target=fire,
+            args=(hour_fired, report_name, group_name)
+        )
+        t.start()
+        threads.append(t)
+        hour_fired += 1
+
+        # Pace launches to hit target RPS
+        next_launch = hour_start + (hour_fired * interval)
+        sleep_time  = next_launch - time.time()
+        if sleep_time > 0:
+            time.sleep(sleep_time)
+
+        # Progress print every 1000 queries
+        if hour_fired % 1000 == 0:
+            elapsed    = round(time.time() - hour_start, 1)
+            actual_rps = round(hour_fired / elapsed, 2) if elapsed > 0 else 0
+            print(f"  [{hour_label}:00] Fired: {hour_fired:,}/{total_calls:,} | "
+                  f"Elapsed: {elapsed}s | Actual RPS: {actual_rps} | "
+                  f"Errors: {error_count}")
+
+    # Wait for all threads to complete
+    for t in threads:
+        t.join()
+
+    hour_elapsed    = round(time.time() - hour_start, 2)
+    hour_actual_rps = round(hour_fired / hour_elapsed, 2)
+    print(f"  [{hour_label}:00] DONE — {hour_fired:,} queries | "
+          f"{hour_elapsed}s | {hour_actual_rps} actual RPS")
+
+# ═══════════════════════════════════════════════════════════════
+# 9. MAIN — RUN ALL HOURS
+# ═══════════════════════════════════════════════════════════════
+scenario     = SCENARIOS[SCENARIO]
+weights      = scenario["weights"]
+scenario_lbl = scenario["label"]
+
+print(f"\n{'#'*65}")
+print(f"  BHUB COUCHBASE LOAD TEST — DR")
+print(f"  Scenario      : {scenario_lbl}")
+print(f"  Start Time    : {datetime.now().strftime('%d %b %Y %I:%M %p CST')}")
+print(f"  Accounts/call : {ACCOUNTS_PER_CALL}")
+print(f"  Total reports : {len(REPORTS)}")
+print(f"  Hours to run  : {len(HOURLY_CONFIG)}")
+print(f"{'#'*65}\n")
+
+# Print target RPS per hour upfront
+print("Hourly Plan:")
+for hour, config in HOURLY_CONFIG.items():
+    print(f"  {hour}:00 → {config['total_calls']:,} calls → "
+          f"{config['target_rps']} RPS")
+
+test_start = time.time()
+
+for hour_label, config in HOURLY_CONFIG.items():
+    run_hour_wave(hour_label, config, weights)
+    print(f"  Cooling down 5 min before next hour...")
+    time.sleep(300)
+
+test_duration = round(time.time() - test_start, 2)
+
+# ═══════════════════════════════════════════════════════════════
+# 10. FINAL SUMMARY
+# ═══════════════════════════════════════════════════════════════
+print(f"\n{'#'*65}")
+print(f"  TEST COMPLETE")
+print(f"  Total duration       : {test_duration}s "
+      f"({round(test_duration/60, 1)} min)")
+print(f"  Total queries fired  : {fired_count:,}")
+print(f"  Total errors         : {error_count:,}")
+print(f"  Overall error rate   : "
+      f"{round(error_count/fired_count*100, 2) if fired_count else 0}%")
+print(f"  Overall actual RPS   : {round(fired_count/test_duration, 2)}")
+print(f"{'#'*65}")
+
+# Build DataFrame (exclude rows column for metrics analysis)
+metrics_rows = [{k: v for k, v in r.items() if k != "rows"}
+                for r in all_rows]
+df = pd.DataFrame(metrics_rows)
+
+# ── Per group summary ────────────────────────────────────────
+print("\n=== PER GROUP SUMMARY ===")
+group_summary = df.groupby("group").agg(
+    total_queries = ("elapsed_ms", "count"),
+    avg_ms        = ("elapsed_ms", "mean"),
+    min_ms        = ("elapsed_ms", "min"),
+    p95_ms        = ("elapsed_ms", lambda x: x.quantile(0.95)),
+    p99_ms        = ("elapsed_ms", lambda x: x.quantile(0.99)),
+    max_ms        = ("elapsed_ms", "max"),
+    avg_kb        = ("payload_kb", "mean"),
+    total_mb      = ("payload_kb", lambda x: round(x.sum()/1024, 2)),
+    error_pct     = ("status",     lambda x:
+                     round(x.str.startswith("ERROR").mean()*100, 2))
+).round(3)
+print(group_summary.to_string())
+
+# ── Per hour summary ─────────────────────────────────────────
+print("\n=== PER HOUR SUMMARY ===")
+hour_summary = df.groupby("hour").agg(
+    total_queries = ("elapsed_ms", "count"),
+    avg_ms        = ("elapsed_ms", "mean"),
+    max_ms        = ("elapsed_ms", "max"),
+    actual_rps    = ("elapsed_ms", lambda x:
+                     round(len(x)/((df[df.hour==x.name].wall_sec.sum() or 1)), 2))
+).round(3)
+print(hour_summary.to_string())
+
+# ── JMeter-style per report summary ──────────────────────────
+print("\n=== PER REPORT SUMMARY (JMeter Format) ===")
+summary_rows = []
+for report_name, grp in df.groupby("report"):
+    total  = len(grp)
+    errors = grp.status.str.startswith("ERROR").sum()
+    summary_rows.append({
+        "Transaction Name"         : report_name,
+        "Total No of Transactions" : total,
+        "Average Response (sec)"   : round(grp.elapsed_ms.mean()/1000, 3),
+        "Min Response (sec)"       : round(grp.elapsed_ms.min()/1000,  3),
+        "Max Response (sec)"       : round(grp.elapsed_ms.max()/1000,  3),
+        "Error %"                  : f"{round(errors/total*100, 2)}%",
+        "Throughput per sec"       : round(total/test_duration, 4),
+        "Avg Payload (KB)"         : round(grp.payload_kb.mean(), 3),
+        "Avg Rows Returned"        : round(grp.result_count.mean(), 1),
+        "P95 Response (sec)"       : round(grp.elapsed_ms.quantile(0.95)/1000, 3),
+        "P99 Response (sec)"       : round(grp.elapsed_ms.quantile(0.99)/1000, 3),
+    })
+
+summary_df = pd.DataFrame(summary_rows)
+print(summary_df.to_string(index=False))
+
+# ── Phase timing summary ─────────────────────────────────────
+print("\n=== AVG PHASE TIMINGS (ms) ===")
+phase_cols = [
+    "phase_authorize_ms", "phase_parse_ms",    "phase_plan_ms",
+    "phase_index_scan_ms","phase_fetch_ms",     "phase_filter_ms",
+    "phase_project_ms",   "phase_stream_ms"
+]
+existing_phases = [c for c in phase_cols if c in df.columns]
+print(df.groupby("group")[existing_phases].mean().round(3).to_string())
+
+# ═══════════════════════════════════════════════════════════════
+# 11. EXPORT
+# ═══════════════════════════════════════════════════════════════
+ts         = datetime.now().strftime("%d_%b_%H%M")
+excel_file = f"{ts}_{scenario_lbl}.xlsx"
+json_file  = f"{ts}_{scenario_lbl}_results.json"
+
+# Excel with multiple tabs
+with pd.ExcelWriter(excel_file, engine="openpyxl") as writer:
+    summary_df.to_excel(
+        writer, sheet_name="JMeter_Summary",   index=False)
+    group_summary.reset_index().to_excel(
+        writer, sheet_name="Group_Summary",    index=False)
+    hour_summary.reset_index().to_excel(
+        writer, sheet_name="Hourly_Summary",   index=False)
+    df[existing_phases + ["group", "report", "hour"]].to_excel(
+        writer, sheet_name="Phase_Timings",    index=False)
+    df.to_excel(
+        writer, sheet_name="Raw_Metrics",      index=False)
+
+# JSON with full rows buffered
+with open(json_file, "w") as f:
+    json.dump(all_rows, f, indent=2, default=str)
+
+print(f"\nExcel  saved : {excel_file}")
+print(f"JSON   saved : {json_file}")
+print(f"\nTotal transactions fired : {fired_count:,}")
+print(f"Total errors             : {error_count:,}")
+print(f"Success rate             : "
+      f"{round((fired_count-error_count)/fired_count*100,2) if fired_count else 0}%")
