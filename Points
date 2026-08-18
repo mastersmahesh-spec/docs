@@ -1,0 +1,17 @@
+
+
+	•	Document intelligence (RAG, summarization)
+	•	Vector search / embeddings
+	•	LLM-assisted data discovery (“ask your data”)
+
+Interoperability / Multi-Engine
+
+	•	Open table format support (Delta/Iceberg)
+	•	Multi-engine querying (Spark, SQL, Python) on same data
+	•	Data sharing across platforms without duplication
+
+Developer Experience / Platform Ops
+
+	•	CI/CD for pipelines (already listed)
+	•	Sandbox/dev environment provisioning
+	•	Version control & release management
