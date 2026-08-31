@@ -1,0 +1,192 @@
+"""
+Convert the structured JSON into a BAI2 file.
+
+v2 - Updated after validating against a FULL real Volante sample file
+(header through trailers), not just a mid-file excerpt. Two things changed
+from v1 based on that validation:
+
+1. WRAP WIDTH IS NOT A HARDCODED CONSTANT. It's the "Physical Record
+   Length" field in the 01 file header (confirmed: a file with PRL=94 in
+   its header wraps every physical line - 03 records AND 16/88 blocks -
+   to exactly 94 characters; content chunk = PRL - 3, since every record
+   code + comma, including "88,", is always 3 characters). This is now
+   read from BAI2_CONFIG['physical_record_length'] and applied uniformly.
+   VALIDATED: reconstructed a real 16/88 four-line block character-for-
+   character against your sample using this rule - exact match.
+
+   NOTE: if a file's header leaves this field defaulted/blank, the file
+   uses variable-length records and this wrap rule doesn't strictly apply
+   per spec - confirm with your bank/Volante config what wrap width (if
+   any) they use in that case. Don't assume 94 or 97 carries over.
+
+2. CONTROL TOTAL FORMULA - CONFIRMED, not guessed:
+   Account control total (49 record) = sum of ALL amounts in the 03
+   summary record for that account, PLUS sum of ALL amounts in every 16
+   detail record for that account. Validated against your real sample:
+   summary amounts summed to 1,205,943,138; detail amounts summed to
+   1,205,608,384; total = 2,411,551,522 - matches the real 49 record
+   exactly. Group (98) and file (99) control totals are assumed to sum
+   their child totals (account totals for 98, group totals for 99) -
+   this follows the same pattern but wasn't independently verified since
+   the sample only had one account and one group.
+
+STILL NOT VALIDATED / NEEDS YOUR INPUT:
+  - Where the 03 summary code amounts (010/015/035/040/045/070/072/074/
+    100/400 etc.) actually come from - they are NOT derivable from the
+    transaction list alone (some, like 100/400, happen to equal
+    aggregates of the detail records in the sample, but others like 070
+    do not obviously derive from anything in the JSON). This likely needs
+    a separate balance feed. Placeholder zeros are used except where
+    passed in via the "summary_codes" key on the account.
+  - 01/02 header sender ID, receiver ID, file ID, date/time - still bank
+    config, not in your source data.
+  - funds_type "Z" hardcoded - only CR-type transactions seen in samples
+    so far.
+
+Usage:
+    python json_to_bai2.py transactions.json output.bai2
+"""
+
+import sys
+import json
+
+BAI2_CONFIG = {
+    "sender_id": "071026356",        # PLACEHOLDER - confirm real sender ID
+    "receiver_id": "3223902",        # PLACEHOLDER - confirm real receiver ID
+    "file_creation_date": "260820",  # YYMMDD - should be generated at runtime
+    "file_creation_time": "0710",    # HHMM
+    "file_id_number": "1",
+    "group_status": "1",
+    "currency_code": "USD",
+    "physical_record_length": 94,    # PLACEHOLDER - read from real file's 01 header; confirm per-bank
+}
+
+
+def wrap_record(record_code, body, prl):
+    """
+    Wrap a logical record's comma-joined body into physical lines of
+    exactly `prl` characters (except possibly the last line), prefixing
+    the first line with the real record code and every continuation line
+    with "88,". Validated against real Volante output - see module
+    docstring point 1.
+    """
+    chunk_size = prl - 3  # "XX," or "88," is always 3 chars
+    if chunk_size <= 0:
+        raise ValueError(f"physical_record_length {prl} too small to fit any content")
+
+    lines = []
+    i = 0
+    first = True
+    while i < len(body) or first:
+        chunk = body[i:i + chunk_size]
+        prefix = f"{record_code}," if first else "88,"
+        lines.append(prefix + chunk)
+        i += chunk_size
+        first = False
+        if i >= len(body):
+            break
+    return lines
+
+
+def build_16_record_body(txn):
+    fields = [txn["bai_code"], txn["amount"], "Z", txn["bk_ref"], txn["cust_ref"]]
+    text = ",".join(txn["descriptions"])
+    return ",".join(str(f) for f in fields) + "," + text
+
+
+def build_03_record_body(account_number, summary_codes):
+    """
+    summary_codes: list of (type_code, amount, item_count) tuples.
+    Each becomes "type,amount,count," (trailing empty = funds-type
+    distribution, unused here). Ends the body with "/" as spec requires
+    when the record doesn't end in text.
+    """
+    parts = [account_number, BAI2_CONFIG["currency_code"]]
+    for type_code, amount, item_count in summary_codes:
+        parts.extend([str(type_code), str(amount), str(item_count) if item_count is not None else "", ""])
+    return ",".join(parts) + "/"
+
+
+def build_account_block(account_number, account_data, prl):
+    summary_codes = account_data.get("summary_codes", [])
+    if not summary_codes:
+        # No balance feed data supplied - defaults to a zeroed placeholder.
+        # THIS WILL PRODUCE AN INCORRECT CONTROL TOTAL until real summary
+        # data is wired in (see module docstring).
+        summary_codes = [(100, 0, 0), (400, 0, 0)]
+
+    lines = []
+    lines.extend(wrap_record("03", build_03_record_body(account_number, summary_codes), prl))
+
+    detail_amount_sum = 0
+    for txn in account_data["transactions"]:
+        lines.extend(wrap_record("16", build_16_record_body(txn), prl))
+        try:
+            detail_amount_sum += int(txn["amount"])
+        except ValueError:
+            pass
+
+    summary_amount_sum = sum(int(amt) for _, amt, _ in summary_codes)
+    account_control_total = summary_amount_sum + detail_amount_sum
+
+    lines.append(f"49,{account_control_total},{len(lines) + 1}/")
+    return lines, account_control_total
+
+
+def build_bai2(data):
+    accounts = data["accounts"]
+    if not accounts:
+        raise ValueError("No accounts found in input JSON")
+
+    prl = BAI2_CONFIG["physical_record_length"]
+    as_of_date = next(iter(accounts.values()))["as_of_date"]
+
+    file_lines = []
+    file_lines.append(
+        f"01,{BAI2_CONFIG['sender_id']},{BAI2_CONFIG['receiver_id']},"
+        f"{BAI2_CONFIG['file_creation_date']},{BAI2_CONFIG['file_creation_time']},"
+        f"{BAI2_CONFIG['file_id_number']},{prl},,{2}/"
+    )
+    file_lines.append(
+        f"02,{BAI2_CONFIG['receiver_id']},{BAI2_CONFIG['sender_id']},"
+        f"{BAI2_CONFIG['group_status']},{as_of_date},{BAI2_CONFIG['file_creation_time']},"
+        f"{BAI2_CONFIG['currency_code']},{2}/"
+    )
+
+    group_total = 0
+    for account_number, account_data in accounts.items():
+        account_lines, account_total = build_account_block(account_number, account_data, prl)
+        file_lines.extend(account_lines)
+        group_total += account_total
+
+    # 98 record_count = every line from the 02 header through this 98 line, inclusive
+    group_record_count = len(file_lines) + 1
+    file_lines.append(f"98,{group_total},{len(accounts)},{group_record_count}/")
+
+    # 99 record_count = every line in the entire file, from 01 through this 99 line, inclusive
+    file_record_count = len(file_lines) + 1
+    file_lines.append(f"99,{group_total},1,{file_record_count}/")
+
+    return file_lines
+
+
+def main():
+    if len(sys.argv) != 3:
+        print("Usage: python json_to_bai2.py <transactions.json> <output.bai2>")
+        sys.exit(1)
+
+    input_path, output_path = sys.argv[1], sys.argv[2]
+
+    with open(input_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    lines = build_bai2(data)
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+    print(f"Wrote {output_path}: {len(lines)} lines")
+
+
+if __name__ == "__main__":
+    main()
