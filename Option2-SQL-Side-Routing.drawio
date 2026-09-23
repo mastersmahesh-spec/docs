@@ -1,0 +1,76 @@
+<mxfile host="app.diagrams.net">
+  <diagram name="Option 2 - SQL-side routing" id="opt2">
+    <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1040" pageHeight="1300" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="Option 2: SQL Server-side routing (generic staging table + T-SQL merge)" style="text;html=1;fontSize=16;fontStyle=1;align=left;" vertex="1" parent="1">
+          <mxGeometry x="40" y="10" width="720" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="encompass" value="Encompass Developer Connect&#10;sends webhook events" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="360" y="60" width="220" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="example_events" value="Example - LoanId L123 sends 2 events (chunked, disjoint fields):&#10;&#10;Event A (chunkId=1, ts=t1):&#10;  FieldId 4000 = 125.00&#10;  FieldId 4002 = 50.00&#10;&#10;Event B (chunkId=2, ts=t2):&#10;  FieldId 1109 = 2026-10-01&#10;  FieldId 1110 = 2026-10-03" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="640" y="45" width="300" height="140" as="geometry" />
+        </mxCell>
+
+        <mxCell id="mulesoft" value="MuleSoft HTTPS Listener&#10;(Wintrust DC)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="360" y="170" width="220" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="raw_topic" value="Confluent raw topic&#10;key = LoanId (e.g. L123)&#10;transport only, no mapping logic here" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="350" y="280" width="240" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sink" value="Single JDBC Sink Connector&#10;no mapping - writes every field&#10;event as its own generic row" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="350" y="390" width="240" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="staging" value="Staging table: LoanFieldEvents_Staging&#10;&#10;LoanId | FieldId | Value      | ChunkId | EventTs | Processed&#10;L123   | 4000    | 125.00     |  1      |  t1     | 0&#10;L123   | 4002    | 50.00      |  1      |  t1     | 0&#10;L123   | 1109    | 2026-10-01 |  2      |  t2     | 0&#10;L123   | 1110    | 2026-10-03 |  2      |  t2     | 0" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=9;align=left;spacingLeft=8;fontFamily=Courier New;" vertex="1" parent="1">
+          <mxGeometry x="260" y="500" width="440" height="130" as="geometry" />
+        </mxCell>
+
+        <mxCell id="registry" value="FieldRegistry table&#10;FieldId -&gt; TargetTable.TargetColumn&#10;4000 -&gt; Fees.LateChargeAmt&#10;4002 -&gt; Fees.ProcessingFee&#10;1109 -&gt; KeyDates.ClosingDate&#10;1110 -&gt; KeyDates.FundingDate" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="740" y="510" width="260" height="110" as="geometry" />
+        </mxCell>
+
+        <mxCell id="job" value="Micro-batch job (SQL Agent / Azure Function, every 10-30s)&#10;JOIN staging rows to FieldRegistry&#10;GROUP BY TargetTable&#10;build one dynamic MERGE per table" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="300" y="670" width="340" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="merge_fees" value="Dynamic MERGE -&gt; Fees table&#10;SET LateChargeAmt = 125.00,&#10;    ProcessingFee = 50.00&#10;WHERE EventTs &gt; LastAppliedTs" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="80" y="810" width="260" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="merge_keydates" value="Dynamic MERGE -&gt; KeyDates table&#10;SET ClosingDate = 2026-10-01,&#10;    FundingDate = 2026-10-03&#10;WHERE EventTs &gt; LastAppliedTs" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="380" y="810" width="260" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="exceptions" value="Unmapped FieldId&#10;-&gt; Exceptions table&#10;(reviewed manually, never&#10;silently dropped)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="700" y="810" width="240" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="mark_processed" value="Mark staging rows Processed = 1&#10;(so the next batch run skips them)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=10;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="80" y="930" width="560" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="conclusion" value="Result: Event A and Event B carry disjoint columns, so both MERGEs run in the same batch pass, independently.&#10;No reassembly needed - each field updates its own table/column once its staging row is picked up.&#10;The EventTs guard on each MERGE stops a late-arriving, older chunk from overwriting a newer value." style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=10;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="80" y="1000" width="700" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;" edge="1" parent="1" source="encompass" target="mulesoft"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;" edge="1" parent="1" source="mulesoft" target="raw_topic"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;" edge="1" parent="1" source="raw_topic" target="sink"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;" edge="1" parent="1" source="sink" target="staging"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;" edge="1" parent="1" source="staging" target="job"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e6" value="join" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;dashed=1;" edge="1" parent="1" source="registry" target="job"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;" edge="1" parent="1" source="job" target="merge_fees"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;" edge="1" parent="1" source="job" target="merge_keydates"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;" edge="1" parent="1" source="job" target="exceptions"><mxGeometry relative="1" as="geometry" /></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

@@ -1,0 +1,77 @@
+<mxfile host="app.diagrams.net">
+  <diagram name="Option 1 - Kafka-side routing" id="opt1">
+    <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="960" pageHeight="1400" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="Option 1: Kafka-side routing (ksqlDB + per-table JDBC Sink connectors)" style="text;html=1;fontSize=16;fontStyle=1;align=left;" vertex="1" parent="1">
+          <mxGeometry x="40" y="10" width="700" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="encompass" value="Encompass Developer Connect&#10;sends webhook events" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="340" y="60" width="220" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="example_events" value="Example - LoanId L123 sends 2 events (chunked, disjoint fields):&#10;&#10;Event A (chunkId=1):&#10;  FieldId 4000 (Fees.LateChargeAmt) = 125.00&#10;  FieldId 4002 (Fees.ProcessingFee) = 50.00&#10;&#10;Event B (chunkId=2):&#10;  FieldId 1109 (KeyDates.ClosingDate) = 2026-10-01&#10;  FieldId 1110 (KeyDates.FundingDate) = 2026-10-03" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="620" y="40" width="300" height="150" as="geometry" />
+        </mxCell>
+
+        <mxCell id="mulesoft" value="MuleSoft HTTPS Listener&#10;(Wintrust DC)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="340" y="170" width="220" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="raw_topic" value="Confluent raw topic&#10;key = LoanId (e.g. L123)&#10;Event A and Event B both land here;&#10;order across chunks not guaranteed" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="320" y="280" width="260" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="registry_ktable" value="Field Registry KTable&#10;(sourced from mapping table)&#10;FieldId -&gt; TargetTable.TargetColumn&#10;4000 -&gt; Fees.LateChargeAmt&#10;4002 -&gt; Fees.ProcessingFee&#10;1109 -&gt; KeyDates.ClosingDate&#10;1110 -&gt; KeyDates.FundingDate" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="640" y="270" width="280" height="120" as="geometry" />
+        </mxCell>
+
+        <mxCell id="ksqldb" value="ksqlDB stream-table JOIN&#10;resolves each field on each event&#10;to its target table + column,&#10;reshapes the record" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="320" y="410" width="260" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="topic_fees" value="Topic: sql.fees&#10;key = L123&#10;value = &#123;LateChargeAmt: 125.00,&#10;         ProcessingFee: 50.00&#125;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="120" y="540" width="240" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="topic_keydates" value="Topic: sql.keydates&#10;key = L123&#10;value = &#123;ClosingDate: 2026-10-01,&#10;         FundingDate: 2026-10-03&#125;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="480" y="540" width="240" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sink_fees" value="JDBC Sink Connector&#10;insert.mode=upsert, pk.mode=record_key" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="120" y="670" width="240" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sink_keydates" value="JDBC Sink Connector&#10;insert.mode=upsert, pk.mode=record_key" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="480" y="670" width="240" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sql_fees" value="SQL Server: Fees table&#10;MERGE sets only:&#10;  LateChargeAmt = 125.00&#10;  ProcessingFee = 50.00&#10;(all other columns on the row untouched)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="100" y="770" width="280" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sql_keydates" value="SQL Server: KeyDates table&#10;MERGE sets only:&#10;  ClosingDate = 2026-10-01&#10;  FundingDate = 2026-10-03&#10;(all other columns on the row untouched)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="460" y="770" width="280" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="conclusion" value="Result: Event A and Event B carry disjoint columns, so both MERGEs run independently and in parallel.&#10;No reassembly needed - each field updates its own table/column as soon as its event is resolved.&#10;Ordering only matters within the same (LoanId, table, column); guard with an EventTs check in the MERGE." style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=10;align=left;spacingLeft=8;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="100" y="900" width="640" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;" edge="1" parent="1" source="encompass" target="mulesoft"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;" edge="1" parent="1" source="mulesoft" target="raw_topic"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;" edge="1" parent="1" source="raw_topic" target="ksqldb"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e4" value="join" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;dashed=1;" edge="1" parent="1" source="registry_ktable" target="ksqldb"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;" edge="1" parent="1" source="ksqldb" target="topic_fees"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;" edge="1" parent="1" source="ksqldb" target="topic_keydates"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;" edge="1" parent="1" source="topic_fees" target="sink_fees"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;" edge="1" parent="1" source="topic_keydates" target="sink_keydates"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;" edge="1" parent="1" source="sink_fees" target="sql_fees"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e10" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;" edge="1" parent="1" source="sink_keydates" target="sql_keydates"><mxGeometry relative="1" as="geometry" /></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
