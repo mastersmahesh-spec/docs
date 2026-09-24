@@ -1,0 +1,25 @@
+Yes—here’s the editable Mermaid version. The job and trigger are alternatives; both call the same stored procedure.
+
+flowchart TD
+    A["Encompass webhook<br/>Fields 65, 52, 65#2, 52#2"]
+    B["MuleSoft receives event<br/>Keeps event ID, Loan ID, and JSON"]
+    C["Kafka raw topic<br/>Key: Loan ID"]
+    D["JDBC Sink"]
+    E["SQL Server staging table<br/>One row per webhook; JSON intact"]
+    A --> B --> C --> D --> E
+    E --> F["Option A: SQL Agent job<br/>Poll pending events"]
+    E --> G["Option B: AFTER INSERT trigger<br/>Start on insert"]
+    F --> H["Shared stored procedure<br/>Expand JSON into field changes"]
+    G --> H
+    R["Field registry<br/>Field + borrower number → table + column"]
+    H --> J["Join changes to field registry"]
+    R --> J
+    J --> K{"Mapping found?"}
+    K -- No --> X["Exception table<br/>Review and replay"]
+    K -- Yes --> L["Group changes by target table<br/>Update only changed columns"]
+    L --> M["Borrower1Information"]
+    L --> N["Borrower2Information"]
+    L --> O["Other target tables"]
+    M --> P["Mark staging event processed"]
+    N --> P
+    O --> P
